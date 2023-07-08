@@ -253,11 +253,12 @@ def session(filename,tag='_red',outfile=None,verbose=False):
     hdulist = fits.HDUList()
     hdulist.append(fits.table_to_hdu(Table(final)))
     vel = finaldata[0]['vel']
-    hdulist[0].header['CRVAL1'] = vel[0]
-    hdulist[0].header['CDELT1'] = vel[1]-vel[0]
-    hdulist[0].header['CRPIX1'] = 1
-    hdulist[0].header['NAXIS1'] = npix
-    hdulist[0].header['CTYPE1'] = 'velocity'
+    hdulist.append(fits.ImageHDU(vel))
+    hdulist[2].header['CRVAL1'] = vel[0]
+    hdulist[2].header['CDELT1'] = vel[1]-vel[0]
+    hdulist[2].header['CRPIX1'] = 1
+    hdulist[2].header['NAXIS1'] = npix
+    hdulist[2].header['CTYPE1'] = 'velocity'
     print('Writing data to ',outfile)
     hdulist.writeto(outfile,overwrite=True)
     
