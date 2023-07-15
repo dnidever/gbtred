@@ -183,13 +183,216 @@ def dointegration(tab,npoly=5,verbose=True):
         last_combspec = combspec
         if verbose:
             print(count,maxdiff)
-        
-    out = {'spec':combspec,'nspec':ngood,'freq':allfreq,'vel':allvel,'header':header,'coef':coefarr}
+
+    # Calculate the switching amount
+    crval1 = np.array([t['crval1'] for t in tab])
+    freq_switch_offset = np.abs(np.max(crval1)-np.min(crval1))
+            
+    out = {'spec':combspec,'nspec':ngood,'freq':allfreq,'vel':allvel,
+           'freq_switch_offset':freq_switch_offset,
+           'header':header,'coef':coefarr}
         
     return out
 
+def cleansidelobes(sp,smlen=5,verbose=False):
+    """
+    Clean up the sidelobes by iteratively subtracting the signal.
+    """
 
+    spec = sp['spec']
+    vel = sp['vel'] / 1e3
+    freq = sp['freq']
+    npix = len(spec)
+    
+    freq_switch_offset_hz = sp['freq_switch_offset']  # in Hz
+    freq_switch_offset_chan =  int( freq_switch_offset_hz / np.abs(sp['header']['cdelt1']) )
 
+    # Iteration
+    vmaxarr = [50,100,200,300]
+    bestspec = spec
+    for i in range(len(vmaxarr)):
+        vmax = vmaxarr[i]
+        if verbose:
+            print(i+1,' vmax: ',vmax)
+        resid = np.copy(spec)
+        
+        # --- Fit negative shift ---
+    
+        # Get zero-velocity region
+        ind, = np.where(np.abs(vel) < vmax)
+        imin = ind[0]
+        imax = ind[-1]
+        lo = imin - freq_switch_offset_chan
+        hi = imax - freq_switch_offset_chan
+        if hi > 0:
+            if lo < 0:
+                lo = 0
+                imin = freq_switch_offset_chan
+            ref = -bestspec[imin:imax]
+            if smlen is not None:  # Smooth a little bit
+                ref = dln.medfilt(ref,int(smlen))            
+            sig = spec[lo:hi]
+            # sometimes the relationship is not a simple scalar scaling factor
+            #  especially if the zero-velocity region is the near the edge
+            negcoef = np.polyfit(ref,sig,2)
+            if verbose:
+                print('negative shift coef:',negcoef)            
+            negmodel = np.polyval(negcoef,ref)
+            resid[lo:hi] -= negmodel
+        else:
+            # completely outside the range
+            pass
+    
+        # --- Fit positive shift ---
+
+        # Get zero-velocity region
+        ind, = np.where(np.abs(vel) < 50)
+        imin = ind[0]
+        imax = ind[-1]
+        lo = imin + freq_switch_offset_chan
+        hi = imax + freq_switch_offset_chan
+        if lo < npix-1:
+            if hi > npix-1:
+                hi = npix
+                imax = npix-freq_switch_offset_chan
+            ref = -bestspec[imin:imax]
+            if smlen is not None:   # Smooth a little bit
+                ref = dln.medfilt(ref,int(smlen))
+            sig = spec[lo:hi]
+            # sometimes the relationship is not a simple scalar scaling factor
+            #  especially if the zero-velocity region is the near the edge
+            poscoef = np.polyfit(ref,sig,2)
+            if verbose:
+                print('positive shift coef:',poscoef)
+            posmodel = np.polyval(poscoef,ref)
+            resid[lo:hi] -= posmodel
+        else:
+            # completely outside the range
+            pass
+
+        bestspec = resid
+
+    # Make new dictionary
+    newsp = {'spec':resid, 'nspec':np.copy(sp['nspec']), 'freq':np.copy(sp['freq']),
+             'vel':np.copy(sp['vel']), 'freq_switch_offset':sp['freq_switch_offset'],
+             'header':sp['header'].copy(), 'coef':sp['coef'].copy(),
+             'poscoef':poscoef, 'negcoef':negcoef}
+        
+    return newsp
+
+def rawfit(raw,sp):
+    """
+    Fit the raw baselines with a first-estimate spectrum (with side-lobes cleaned).
+    """
+
+    nraw = len(raw)
+    npix = len(raw[0]['data'])
+    
+    # Get initial estimate of the baselines
+    data = np.zeros((nraw,npix),float)
+    for i in range(nraw):
+        data[i,:] = raw[i]['data']
+    med = np.nanmin(data,axis=0)
+    sig = dln.mad(data,axis=0)
+    medsig = np.median(sig)
+    resid = np.zeros((nraw,npix),float)
+    for i in range(nraw):
+        scl = np.nanmedian(data[i,:]/med)
+        resid[i,:] = data[i,:] - scl*med
+    #resid = data - med.reshape(1,-1)
+    bad = (resid > 5*medsig)  # mask positive outliers
+    masked_data = np.ma.masked_array(data,mask=bad)
+    bline = np.ma.median(masked_data,axis=0)
+    
+    # Bspline
+    x = np.arange(npix)
+    p10 = int(npix*0.10)
+    p90 = int(npix*0.90)
+    w = np.ones(npix)
+    vel = getvel(raw[0])
+    zerovel, = np.where(np.abs(vel) < 100000)
+    w[zerovel] = 0.00001
+    bspl = dln.bspline(x[p10:p90],bline[p10:p90],w=w[p10:p90],nquantiles=10,nord=2)
+    bspl_model = bspl(x)
+
+    # Loop over the raw spectra and fit them
+    refarr = np.zeros((nraw,npix),float)
+    calarr = np.zeros((nraw,npix),float)
+    for i in range(nraw):
+        data1 = data[i,:]
+        freq = getfreq(raw[i])
+        lo = np.where(np.abs(sp['freq']-freq[0]) < 100)[0][0]
+        hi = np.where(np.abs(sp['freq']-freq[-1]) < 100)[0][0]
+        spec = sp['spec'][lo:hi+1]
+        # use the initial bspline reference to rougly calibrate the raw spectrum
+        cal = data1/bspl_model - 1
+        bzero = np.nanmedian(cal)
+        cal -= bzero
+        good = np.isfinite(cal)
+        # Find the scaling factor
+        sclcoef = np.polyfit(spec[good],cal[good],1)
+        # Now fit a line to the residuals
+        resid = cal - np.polyval(sclcoef,spec)
+        x = np.arange(npix)
+        bcoef = np.polyfit(x[good],resid[good],1)
+        # Construct a better reference baseline model
+        bmodel = bspl_model.copy()
+        bmodel *= (1+bzero)                 # scale down the original model
+        bmodel *= (1+np.polyval(bcoef,x))   # remove the residual linear baseline
+        # Now subtract the actual spectrum from the raw data
+        scaled_spec = bmodel * spec*sclcoef[0]
+        rawresid = data1 - scaled_spec
+        # Refit the bspline
+        w = np.ones(npix)
+        vel = getvel(raw[i])
+        zerovel, = np.where(np.abs(vel) < 100000)
+        w[zerovel] = 0.00001
+        bspl = dln.bspline(x[good],rawresid[good],w=w[good],nquantiles=10,nord=2)
+        best_bmodel = bspl(x)
+
+        # Now iterate
+        # While loop
+        flag = True
+        count = 0
+        last_best_bmodel = np.zeros(npix)
+        while (flag):
+            # calibrate raw spectrum 
+            cal = data1/best_bmodel - 1
+            bzero = np.nanmedian(cal)
+            cal -= bzero
+            good = np.isfinite(cal)
+            # Find the scaling factor
+            sclcoef = np.polyfit(spec[good],cal[good],1)
+            # Construct a better reference baseline model
+            bmodel = best_bmodel.copy()
+            bmodel *= (1+bzero)                 # scale down the original model
+            # Now subtract the actual spectrum from the raw data
+            scaled_spec = bmodel * spec*sclcoef[0]
+            rawresid = data1 - scaled_spec
+            # Refit the bspline
+            w = np.ones(npix)
+            vel = getvel(raw[i])
+            zerovel, = np.where(np.abs(vel) < 100000)
+            w[zerovel] = 0.00001
+            bspl = dln.bspline(x[good],rawresid[good],w=w[good],nquantiles=10,nord=2)
+            best_bmodel = bspl(x)
+            rdiff = (best_bmodel-last_best_bmodel)/np.nanmedian(best_bmodel)
+            maxrdiff = np.max(np.abs(rdiff[good]))
+            if maxrdiff < 0.01:
+                flag = False
+            print(count,maxrdiff)
+            count += 1
+            last_best_bmodel = best_bmodel.copy()
+        # Put final results into the array
+        refarr[i,:] = best_bmodel
+        calarr[i,:] = data1/best_bmodel - 1
+
+    # Need to deal with the edges!!!
+
+        
+    return refarr,calarr
+
+            
 def session(filename,tag='_red',outfile=None,verbose=False):
     """
     Baseline correct a full session of data for a target/map.
