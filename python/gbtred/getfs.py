@@ -1,12 +1,648 @@
 import numpy as np
-from . import toolbox
+from . import toolbox as tb
+
+
+def getIftabIndices(loc, nif, nfd, npl):
+    """
+    Private function to return the array indices in a 3D iftable array
+    given the array dimensions.
+
+    Used instead of array_indices because of the way IDL tosses out
+    single-element arrays whenever possible, making it damn difficult to
+    write general purpose code.  This routine always returns 3 values.
+
+    The length of the 3rd axis is not important here.  There is no
+    checking loc for validity (the only reason this might care about
+    that value).
+
+    IDL arrays are stored in fortran order.
+
+    @param loc {in}{required}{type=integer} Vector of locations into a
+    3D array described by the other parmeters.
+    @param nif {in}{required}{type=integer} Length of first axis.
+    @param nfd {in}{required}{type=integer} Length of second axis.
+
+    @returns (3,n_elements(loc)) array, one 3-D vector giving the
+    coordinates into a 3D array described by nif, nfd, npl for each
+    element of loc.
+    """
+    
+    nloc = len(loc)
+    result = np.zeros((3, nloc), dtype=int)
+
+    for i in range(nloc):
+        thisLoc = loc[i]
+        
+        ifnum = thisLoc % nif
+        fdnum = ((thisLoc - ifnum) // nif) % nfd
+        plnum = (thisLoc - ifnum - fdnum * nfd) // (nif * nfd)
+
+        result[:, i] = [ifnum, fdnum, plnum]
+
+    return result
+
+
+def scan_info(scan, filename, keep=False, quiet=False):
+    """
+    Get scan information structure from the appropriate I/O object.
+    
+    <p>This uses !g.line to determine which I/O object to get the
+    information from, unless keep is set, in which case it gets it from
+    the keep file.
+
+    <p>Note that this may return more than one structure (an array of
+    structures would be returned).  This can happen if the same scan
+    number appears in the data with more than one timestamp.  The
+    instance and timestamp keywords of the various data retrieval
+    procedures (getscan, get, getnod, getps, etc) can be used to
+    differentiate between these duplicate scans.  The instance keyword
+    in those cases corresponds to the element number of the array
+    returned by scan_info.  The timestamp keyword corresponds to the
+    timestamp field in the scan_info structure.
+
+    <p>The data corresponding to a given instance are always found in
+    consecutive records.  The index_start and nrecords fields can be
+    used to get just the data associated with a specific instance.  See
+    the examples.
+
+    The fields in the returned structure are:
+    <UL>
+    <LI> SCAN, the scan number, long integer
+    <LI> PROCSEQN, the procedure sequence number, long integer
+    <LI> PROCEDURE, the procedure name, string
+    <LI> TIMESTAMP, the timestamp associated with this scan, string
+    <LI> FILENAME, the name of the file where this scan was found
+    <LI> N_INTEGRATION, the number of integrations, long integer.  Note
+    that different samplers may have different numbers of integrations.
+    This value is the number of unique times (MJD) found for this scan.
+    Use N_SAMPINTS for the number of integrations from a given sampler.
+    <LI> N_FEEDS, the number of feeds, long integer
+    <LI> FDNUMS, the specific FDNUM values for this scan.
+    <LI> N_IFS, the number of IFs, long integer
+    <LI> IFNUMS, the specific IFNUM values for this scan.
+    <LI> IFTABLE, a 3-axis array indicating which combinations of ifnum,
+    fdnum and plnum are present in the data.  The first axis is ifnum,
+    the second axis is fdnum and the 3rd is plnum.  Combinations with
+    data have 1 in this array.  Combinations without data have a 0.
+    Note: IDL removes any trailing axis of length 1 (degenerate) so care
+    must be taken when using the shape of this array.  E.g. if there is
+    no third axis, then there is only one plnum, plnum=0.
+    <LI> N_SWITCHING_STATES, the number of switching states, long integer
+    <LI> N_CAL_STATES, the number of cal switching states, long integer
+    <LI> N_SIG_STATES, the number of sig switching states, long integer
+    <LI> N_WCALPOS, the total number of unique WCALPOS values in this
+    scan. (spectral line data only)
+    <LI> WCALPOS, a vector giving the list of unique WCALPOS
+    (WBand receiver calposition) values for this scan. (spectral line
+    data only)
+    <LI> N_POLARIZATIONS, the number of unique polarizations, long
+    integer, will always be less then or equal to 4.
+    <LI> POLARIZATIONS, a vector containing the actual
+    polarizations, string (unused elements are the null string).
+    <LI> PLNUMS, vector containing the PLNUM values
+    corresponding to each POLARIZATION, long integer (unused elements
+    are -1)
+    <LI> FEEDS, a vector containing the unique feed ids, long
+    integer (unused elements are -1)
+    <LI> BANDWIDTH, a vector containing the unique bandwidths, one for each IF
+    (Hz)
+    <LI> INDEX_START, the starting index number for this scan.
+    <LI> NRECORDS, the total number of records in this scan.
+    <LI> N_SAMPLERS, the total number of unique sampler names in this scan.
+    <LI> SAMPLERS, the list of unique sampler names.
+    <LI> N_SAMPINTS, the number of integrations for each sampler.
+    <LI> N_CHANNELS, the number of channels in each spectrum for each sampler.
+    </UL>
+
+    @param scan {in}{required}{type=integer} Scan number to get
+    information on.
+
+    @param filename {in}{optional}{type=string} Limit the search for
+    matching scans to a specific file.  If omitted, scans are found in
+    all files currently opened through filein (a single file) or dirin
+    (possibly multiple files).
+
+    @keyword keep {in}{optional}{type=boolean} If set, the scan
+    information comes from the keep file.
+
+    @keyword quiet {in}{optional}{type=boolean} When set, suppress most
+    error messages.  Useful when being used within another procedure.
+
+    @keyword count {in}{optional}{type=integer} Returns the number of
+    elements of the returned array of scan_info structures.
+
+    @returns Scan information structure.  Returns -1 on error.
+
+    @examples
+    Get all of the data associated with one scan.
+    <pre>
+    a = scan_info(65)
+    indx = lindgen(a.nrecords) + a.index_start
+    d65 = getchunk(index=indx)
+    ... do stuff with d65, but don't forget to free it when done
+    data_free, d65
+    </pre>
+    <p>
+    Find paired scan's and their info structure (e.g. position switched)
+    <pre>
+    a = scan_info(65)
+    b = find_paired_info(a)
+    </pre>
+    """
+    
+    count = 0
+
+    if len(scan) == 0:
+        print('scan_info')
+        return -1
+
+    result = -1
+    count = 0
+
+    if keep:
+        if not lineoutio.is_data_loaded():
+            result = lineoutio.get_scan_info(scan, filename, count=count, quiet=quiet)
+        elif not quiet:
+            print('There is no data in the keep file')
+    else:
+        if not line:
+            if not lineio.is_data_loaded():
+                result = lineio.get_scan_info(scan, filename, count=count, quiet=quiet)
+            elif not quiet:
+                print('There is no data in the line file')
+        else:
+            if not contio.is_data_loaded():
+                result = contio.get_scan_info(scan, filename, count=count, quiet=quiet)
+            elif not quiet:
+                print('There is no data in the continuum file')
+
+    if count <= 0 and not quiet:
+        print('That scan was not found')
+
+    return result
+
+
+def find_scan_info(scan, timestamp=None, instance=None, filename=None):
+    """
+    Find a scan info from the current line filein matching the given scan,
+    file, timestamp, and instance values.  The matching scan_info is
+    returned.  See <a href="scan_info.html">scan_info</a> for more
+    information on the returned structure.
+
+    <p>This is used by all of the standard calibration routines to get
+    the scan_info for the requested scan.  It is encapsulated here to
+    make it easy to adapt and understand those calibration routines.
+
+    If there was a problem, the return value will not be structure (it
+    will be -1).
+
+    Because this is designed to be called from another routine, any
+    error messages are displayed using the prefix appropriate to the
+    calling routine.
+
+    @param scan {in}{required}{type=integer} Scan number to get
+    information on.  This must be provided unless timestamp is provided.
+    @keyword timestamp {in}{optional}{type=string} The M&C timestamp associated
+    with the desired scan. When supplied, scan and instance are ignored.
+    @keyword instance {in}{optional}{type=integer} Which occurence
+    of this scan should be used.  Default is 0.
+    @keyword filename {in}{optional}{type=string} Limit the search for
+    matching scans to a specific file.  If omitted, scans are found in
+    all files currently opened through filein (a single file) or dirin
+    (possibly multiple files).
+    @returns A single scan_info structure.  Returns -1 if a match can
+    not be found.
+
+    @uses <a href="../toolbox/select_data.html">select_data</a>
+    @uses <a href="scan_info.html">scan_info</a>
+    """
+    
+    if timestamp is not None:
+        if len(timestamp) > 1:
+            print('Only one timestamp can be specified')
+            return -1
+
+        recs = select_data(lineio, count=count, timestamp=timestamp, filename=filename)
+        if count <= 0:
+            if file is not None:
+                print('No data having that timestamp is available in file=' + filename)
+            else:
+                print('No data having that timestamp is available.')
+            return -1
+
+        thisScan = lineio.get_index_values('SCAN', index=recs[0])
+        if filename is not None:
+            thisFile = lineio.get_index_values('FILE', index=recs[0])
+            info = scan_info(thisScan, thisFile, count=count)
+        else:
+            info = scan_info(thisScan, count=count)
+
+        if count < 0:
+            print('Unexpectedly did not find a matching scan - this should never happen')
+        theseTimes = info.timestamp
+        thisInstance = np.where(theseTimes == timestamp)[0]
+        if len(thisInstance) < 0:
+            print('Unexpectedly did not find matching timestamp in scan_info record - this should never happen')
+        info = info[thisInstance]
+    else:
+        info = scan_info(scan, filename, count=count, quiet=True)
+        if count <= 0:
+            if filename is not None:
+                print('That scan is not available in file=' + filename)
+            else:
+                print('That scan is not available.')
+            return -1
+
+        if instance is not None:
+            if instance >= count:
+                print('Requested instance does not exist, it must be <', count)
+                return -1
+            info = info[instance]
+        else:
+            if count > 1:
+                print('More than one scan found, using the first one (instance=0)')
+            info = info[0]
+
+    return info
+
+
+def check_calib_args(scan, refscan, intnum=None, ifnum=None, plnum=None, fdnum=None,
+                     sampler=None, eqweight=None, units=None, bswitch=None, quiet=None,
+                     keepints=None, useflag=None, skipflag=None, instance=None, filename=None,
+                     timestamp=None, refinstance=None, reffile=None, reftimestamp=None,
+                     checkref=None, tau=None, ap_eff=None, twofeeds=None, sig_state=None):
+    """
+    This function is used by the standard calibration routines to handle
+    some argument checking and to assign default values to keywords
+    when not provided by the user.
+
+    <p>Encapsulating these here should make it easier for users to
+    adapt a calibration routine to do what they want it to do.
+
+    <p>Since the calibration routines all only work for line data,
+    GBTIDL must currently be in line mode when this routine is called.
+    If it is in continuum mode, that is an error and this function will
+    return -1.  In addition, there must already be line data opened
+    using either filein or dirin.
+    
+    <p>The argument descriptions here refer to what this routine checks
+    for, not what the argument means.  For the meaning of a specific
+    argument, see the calibration routine in question.  Type checking is
+    only done for string keywords.
+
+    <p>Because this routine is designed to be called by another routine,
+    errors are reported such that the message prefix is the name of the
+    calling routine.  Users are least likely to be confused by those
+    messages.
+ 
+    <p>A warning is printed if tau or ap_eff are specified and the units
+    value (explicit or implied) means tau or ap_eff are not used
+    (e.g. the default units 'Ta' do not need tau or ap_eff and so if
+    they are provided, a warning to that effect is printd).  This not
+    considered a severe problem and processing continues.  This can be
+    turned off if the quiet keyword is set.
+
+    <p>If there was a severe problem, the return value is 0 (false) and
+    the calling routine should exit at that point.  If the arguments are
+    all okay then the return value is 1 and any defaults are returned in
+    a structure in the defaults keyword value.
+
+    <p>If sampler is supplied then all 3 of ifnum, plnum, and fdnum must
+    not be supplied.  The returned values for these 3 are all -1,
+    implying that sampler should be used.
+
+    <p>If ifnum, fdnum, or plnum are not supplied, the lowest valid
+    value with data is chosen.  This value is picked by first setting,
+    ifnum, then fdnum, and finally plnum (using any user-supplied values
+    first).  If there is no valid data using the user-supplied values
+    then <a href="showiftab.html">showiftab</a> is used to display the set of valid values and the
+    return value is -1.
+
+    @param scan {in}{optional}{type=integer} If scan is not supplied,
+    then a valid timestamp keyword must be supplied. No default supplied.
+    @param refscan {in}{optional}{type=integer} Ignored unless checkref
+    is true.  If refscan is not supplied, then a valid reftimestamp
+    keyword must be supplied.  No default supplied.
+    @keyword intnum {in}{optional}{type=integer} Must be >= 0.
+    @keyword ifnum {in}{optional}{type=integer} Must be >= 0. Defaults
+    as described above.
+    @keyword plnum {in}{optional}{type=integer} Kust be >= 0. Defaults
+    as described above.
+    @keyword fdnum {in}{optional}{type=integer} Must be >= 0. Defaults
+ 
+    @keyword sampler {in}{optional}{type=string} Must be non-empty.
+    Defaults to '' (empty, unspecified).  When set, the returned ifnum,
+    plnum, and fdnum values are all -1.
+    @keyword eqweight {in}{optional}{type=boolean}
+    @keyword units {in}{optional}{type=string} Must be one of
+    "Ta","Ta*", or "Jy".
+    @keyword bswitch {in}{optional}{type=integer} Must be 0, 1 or 2.
+    Defaults to 0.
+    @keyword quiet {in}{optional}{type=boolean}
+    @keyword keepints {in}{optional}{type=boolean}
+    @keyword useflag {in}{optional}{type=boolean} Only one of useflag
+    and skipflag can be set.
+    @keyword skipflag {in}{optional}{type=boolean} Only one of useflag
+    and skipflag can be set.
+    @keyword instance {in}{optional}{type=integer} Must be >=
+    0. Defaults to 0.
+    @keyword filename {in}{optional}{type=string}
+    @keyword timestamp {in}{optional}{type=string} If scan is not
+    supplied, then a valid timestamp keyword must be supplied.
+    @keyword refinstance {in}{optional}{type=integer} Ignored unless
+    checkref is true.  Must be >= 0.  Defaults to 0.
+    @keyword reffile {in}{optional}{type=string} Ignored unless checkref
+    is true.
+    @keyword reftimestamp {in}{optional}{type=string} Ignored unelss
+    checkref is true.  If refscan is not supplied, then a valid
+    reftimestamp keyword must be supplied.
+    @keyword checkref {in}{optional}{type=boolean} Check refscan and the
+    ref* keywords?
+    @keyword tau {in}{optional}{type=float} Warning if tau is set and
+    units is 'Ta' or unset.
+    @keyword ap_eff {in}{optional}{type=float} Warning if units is not
+    'Jy'.
+    @keyword twofeeds {in}{optional}{type=boolean} When set, fdnum is
+    assumed to be a tracking feed number and it is not influenced by any
+    value that sampler might have.
+    @keyword sig_state {in}{optional}{type=integer} Used for sig_state
+    selection.  When set it must be 0 or 1.  Returned value is -1 if
+    unset or out of bounds.
+    @keyword ret {out}{required}{type=structure} The values to use for
+    ifnum, plnum, fdnum, instance, and bswitch taking into account the defaults
+    as described here.  This is done so that the values of the calling
+    arguments are not altered by this function.
+    @keyword info {out}{required}{type=structure} The scan info structure
+    associated with the scan, timestamp, instance and file arguments as
+    given.  This will not be a structure if there was a problem.
+    """
+    result = 0
+
+    # basic checks
+    if not line:
+        print('This does not work in continuum mode, sorry.')
+        return result,None,None
+
+    if useflag is not None and skipflag is not None:
+        print('Useflag and skipflag cannot be used at the same time')
+        return result,None,None
+
+    if not lineio.is_data_loaded():
+        print('No line data is attached yet, use filein, dirin, online or offline')
+        return result,None,None
+
+    if not scan and not timestamp:
+        print('The scan number is required unless a timestamp is provided.')
+        return result,None,None
+
+    # string argument type checks
+    if filename is not None:
+        if not isinstance(filename, str):
+            print('File must be a string')
+            return result,None,None
+
+    if timestamp is not None:
+        if not isinstance(timestamp, str):
+            print('Timestamp must be a string')
+            return result,None,None
+
+    if units is not None:
+        if not isinstance(units, str):
+            print('units must be a string')
+            return result,None,None
+        if units != 'Jy' and units != 'Ta*' and units != 'Ta':
+            print('units must be one of "Jy", "Ta*", or "Ta" - defaults to "Ta" if not specified')
+            return result,None,None
+
+    if not quiet:
+        doTauWarning = tau is not None and units is None
+        doApEffWarning = ap_eff is not None and units is None
+        if doTauWarning and doApEffWarning:
+            print('tau and ap_eff have been supplied but are not used by units="Ta"')
+        else:
+            if doTauWarning:
+                print('tau has been supplied but is not used by units="Ta"')
+            elif doApEffWarning:
+                print('ap_eff has been supplied but is not used by the requested units')
+
+    if bswitch is not None:
+        if bswitch != 0 and bswitch != 1 and bswitch != 2:
+            print('bswitch must be 0, 1, or 2')
+            return result,None,None
+        ret_bswitch = bswitch
+    else:
+        ret_bswitch = 0
+
+    if sig_state is not None:
+        if sig_state != 0 and sig_state != 1:
+            print('sig_state must be 0 or 1')
+            return result,None,None
+        ret_sig_state = sig_state
+    else:
+        ret_sig_state = -1
+
+    if checkref:
+        if not refscan and not reftimestamp:
+            print('The reference scan number is required unless a reftimestamp is provided.')
+            return result,None,None
+
+        # string argument type checks
+        if reffile is not None:
+            if not isinstance(reffile, str):
+                print('Reffile must be a string')
+                return result,None,None
+
+        if reftimestamp is not None:
+            if not isinstance(reftimestamp, str):
+                print('Reftimestamp must be a string')
+                return result,None,None
+
+    # other checks and defaults
+    retIfnum = 0
+    retPlnum = 0
+    retFdnum = 0
+    retSampler = ''
+    retInstance = 0
+    retRefinstance = 0
+
+    # indicate what defaults needs to be set
+    # don't double check them if the user has explicitly set them
+    checkIfnum = True
+    checkPlnum = True
+    checkFdnum = True
+
+    # need the instance set appropriate first so that we can set the scan_info
+    if instance is not None:
+        if len(instance) > 1:
+            print('Only one INSTANCE can be calibrated at a time')
+            return result,None,None
+        if instance[0] < 0:
+            print('INSTANCE must be >= 0')
+            return result,None,None
+        retInstance = instance[0]
+
+    # need the scan info so that we can set the defaults as necessary/appropriate
+    info = find_scan_info(scan, timestamp=timestamp, instance=retInstance, filename=filename)
+    infoOK = isinstance(info, tuple) and len(info) == 8
+
+    nfd = 0
+    nif = 0
+    npl = 0
+
+    if infoOK:
+        iftabDim = info.iftable.ndim
+        nif = iftabDim[0]
+        nfd = 1 if len(iftabDim) < 2 else iftabDim[1]
+        npl = 1 if len(iftabDim) < 3 else iftabDim[2]
+
+    # checking default tuple in order: ifnum, fdnum, plnum
+    # order matters - defaults when unset depend on previously set defaults in that order
+
+    if ifnum is not None:
+        if ifnum < 0:
+            print('IFNUM must be >= 0')
+            return result,None,None
+        if infoOK and ifnum >= nif:
+            print('IFNUM must be <', nif)
+            return result,None,None
+        retIfnum = ifnum
+        checkIfnum = False
+
+    if fdnum is not None:
+        if fdnum < 0:
+            print('FDNUM must be >= 0')
+            return result,None,None
+        if infoOK and fdnum >= nfd:
+            print('FDNUM must be <', nfd)
+            return result,None,None
+        retFdnum = fdnum
+        checkFdnum = False
+
+    if plnum is not None:
+        if plnum < 0:
+            print('PLNUM must be >= 0')
+            return result,None,None
+        if infoOK and plnum >= npl:
+            print('PLNUM must be <', npl)
+            return result,None,None
+        retPlnum = plnum
+        checkPlnum = False
+
+    if checkIfnum:
+        # ifnum not set by user, set from info.iftable if possible
+        if infoOK:
+            count = 0
+            ai = 0
+            if checkFdnum:
+                if checkPlnum:
+                    # nothing already specified
+                    loc = np.where(info.iftable)
+                    if count > 0:
+                        ai = getIftabIndices(loc, nif, nfd, npl)
+                else:
+                    # plnum specified
+                    loc = np.where(info.iftable[:, :, retPlnum])
+                    if count > 0:
+                        ai = getIftabIndices(loc, nif, nfd, 1)
+            else:
+                if checkPlnum:
+                    # fdnum specified, plnum is not
+                    loc = np.where(info.iftable[:, retFdnum, :])
+                    if count > 0:
+                        ai = getIftabIndices(loc, nif, 1, npl)
+                else:
+                    # both fdnum and plnum are specified
+                    loc = np.where(info.iftable[:, retFdnum, retPlnum])
+                    if count > 0:
+                        ai = getIftabIndices(loc, nif, 1, 1)
+            if count > 0:
+                # ai has dimensions [3,count] unless count=1
+                # in either case, this form of indexing is OK
+                # find whatever the minimum value is along the fdnum axis
+                retIfnum = np.min(ai[0, :])
+
+    if checkFdnum:
+        # fdnum not set by user, retIfnum is now reliable either way
+        # so use it
+        if infoOK:
+            count = 0
+            ai = 0
+            if checkPlnum:
+                loc = np.where(info.iftable[retIfnum, :, :])
+                if count > 0:
+                    ai = getIftabIndices(loc, 1, nfd, npl)
+            else:
+                # plnum already specified
+                loc = np.where(info.iftable[retIfnum, :, retPlnum])
+                if count > 0:
+                    ai = getIftabIndices(loc, 1, nfd, 1)
+            if count > 0:
+                retFdnum = np.min(ai[1, :])
+
+    if checkPlnum:
+        if infoOK:
+            # only thing left to check, if count is positive then
+            # the first found value is the appropriate plnum as is
+            loc = np.where(info.iftable[retIfnum, retFdnum, :])
+            count = len(loc[0])
+            if count > 0:
+                retPlnum = loc[0][0]
+
+    if intnum is not None:
+        if intnum < 0:
+            print('INTNUM must be >= 0')
+            return result,None,None
+
+    if sampler is not None:
+        if len(sampler) > 0:
+            if fdnum is not None or ifnum is not None or plnum is not None:
+                print('IFNUM, PLNUM, and FDNUM cannot be supplied when SAMPLER is supplied')
+                return result,None,None
+            retSampler = sampler
+            if twofeeds is None:
+                retFdnum = -1
+            retIfnum = -1
+            retPlnum = -1
+
+    else:
+        # ifnum, plnum, fdnum have been set either by the user or by the default finding mechanism.
+        # Check that they are valid if info is valid
+        if infoOK:
+            if not info.iftable[retIfnum, retFdnum, retPlnum]:
+                ifstr = 'IFNUM:' + str(retIfnum) + ' '
+                fdstr = 'FDNUM:' + str(retFdnum) + ' '
+                plstr = 'PLNUM:' + str(retPlnum) + ' '
+                print('No data found at', ifstr, fdstr, plstr)
+                showiftab(scan)
+                return result,None,None
+
+    if checkref:
+        if refinstance is not None:
+            if len(refinstance) > 1:
+                print('Only one REFINSTANCE can be calibrated at a time')
+                return result,None,None
+            if refinstance[0] < 0:
+                print('REFINSTANCE must be >= 0')
+                return result,None,None
+            retRefInstance = refinstance[0]
+        # everything is okay
+        ret = {'ifnum': retIfnum, 'plnum': retPlnum, 'fdnum': retFdnum, 'sampler': retSampler,
+               'instance': retInstance, 'refinstance': retRefInstance, 'bswitch': ret_bswitch,
+               'sig_state': ret_sig_state}
+    else:
+        # everything is okay
+        ret = {'ifnum': retIfnum, 'plnum': retPlnum, 'fdnum': retFdnum, 'sampler': retSampler,
+               'instance': retInstance, 'bswitch': ret_bswitch, 'sig_state': ret_sig_state}
+
+    return 1,ret,info
+
 
 
 def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
           tsys=None, tau=None, ap_eff=None, smthoff=None, units=None,
           nofold=None, blankinterp=None, nomask=None, eqweight=None,
           tcal=None, quiet=None, keepints=None, useflag=None, skipflag=None,
-          instance=None, file=None, timestamp=None, status=None):
+          instance=None, filename=None, timestamp=None, status=None):
 
     """
     This procedure retrieves and calibrates a frequency switched scan.  
@@ -174,9 +810,9 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
     refers to the element of the returned array of scan_info structures
     that <a href="scan_info.html">scan_info</a> returns.  So, if scan 23
     appears 3 times then instance=1 refers to the second time that scan 23
-    appears as returned by scan_info.  The file keyword is useful if a 
+    appears as returned by scan_info.  The filename keyword is useful if a 
     scan is unique to a specific file and multiple files have been accessed
-    using <a href="dirin.html">dirin</a>.  If file is specified and instance
+    using <a href="dirin.html">dirin</a>.  If filename is specified and instance
     is also specified, then instance refers to the instance of that scan
     just within that file (which may be different from its instance within
     all opened files when dirin is used).  The timestamp keyword is another
@@ -254,7 +890,7 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
     any or do not apply a few of the flag rules?  Default is unset.
     @keyword instance {in}{optional}{type=integer} Which occurence
     of this scan should be used.  Default is 0.
-    @keyword file {in}{optional}{type=string} When specified, limit the search 
+    @keyword filename {in}{optional}{type=string} When specified, limit the search 
     for this scan (and instance) to this specific file.  Default is all files.
     @keyword timestamp {in}{optional}{type=string} The M&C timestamp associated
     with the desired scan. When supplied, scan and instance are ignored.
@@ -310,16 +946,16 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
     status = -1
 
     # basic argument checks
-    argsOK = check_calib_args(scan, ifnum=ifnum, intnum=intnum, plnum=plnum,
-                              fdnum=fdnum, sampler=sampler, eqweight=eqweight,
-                              units=units, quiet=quiet, keepints=keepints,
-                              useflag=useflag, skipflag=skipflag, instance=instance,
-                              file=file, timestamp=timestamp, tau=tau,
-                              ap_eff=ap_eff, ret=ret, info=info)
+    argsOK,ret,info = check_calib_args(scan, ifnum=ifnum, intnum=intnum, plnum=plnum,
+                                       fdnum=fdnum, sampler=sampler, eqweight=eqweight,
+                                       units=units, quiet=quiet, keepints=keepints,
+                                       useflag=useflag, skipflag=skipflag, instance=instance,
+                                       filename=filename, timestamp=timestamp, tau=tau,
+                                       ap_eff=ap_eff)
     if not argsOK:
         return
 
-    if info.type.size != 8:
+    if info is None:
         return
 
     # FS data must have 4 swiching states, 2 CAL states and 2 SIG states.
@@ -332,7 +968,8 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
         return
 
     # Get the requested data
-    data = get_calib_data(info, ret.ifnum, ret.plnum, ret.fdnum, ret.sampler, count, intnum=intnum,
+    data = get_calib_data(info, ret['ifnum'], ret['plnum'], ret['fdnum'],
+                          ret['sampler'], count, intnum=intnum,
                           useflag=useflag, skipflag=skipflag)
 
     if count <= 0:
@@ -370,7 +1007,7 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
     if (countSigwcal != expectedCount or countSigwcal != countSig or countSigwcal != countRefwcal or
             countSigwcal != countRef):
         print("Unexpected number of spectra retrieved for some or all of the switching phases, can not continue.")
-        toolbox.data_free(data)
+        tb.data_free(data)
         return
 
     # watch for out-of-band frequency switching, it's okay, just turn on nofold if true.
@@ -395,32 +1032,32 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
     tauInts = np.zeros(expectedCount)
     apEffInts = np.zeros(expectedCount)
     for n_int in range(expectedCount):
-        toolbox.dofreqswitch(data[sigwcal[n_int]], data[sig[n_int]], data[refwcal[n_int]],
-                             data[ref[n_int]], smthoff,tsys=tsys, tau=tau, tcal=tcal,
-                             sigResult=sigResult, refResult=refResult)
+        tb.dofreqswitch(data[sigwcal[n_int]], data[sig[n_int]], data[refwcal[n_int]],
+                        data[ref[n_int]], smthoff,tsys=tsys, tau=tau, tcal=tcal,
+                        sigResult=sigResult, refResult=refResult)
 
         if thisnofold:
             # convert units on both result
-            toolbox.dcsetunits(sigResult, units, tau=tau, ap_eff=ap_eff)
-            toolbox.dcsetunits(refResult, units, tau=tau, ap_eff=ap_eff,
-                               ret_tau=ret_tau, ret_ap_eff=ret_ap_eff)
+            tb.dcsetunits(sigResult, units, tau=tau, ap_eff=ap_eff)
+            tb.dcsetunits(refResult, units, tau=tau, ap_eff=ap_eff,
+                          ret_tau=ret_tau, ret_ap_eff=ret_ap_eff)
         else:
             # fold the two results
-            folded = toolbox.dcfold(sigResult, refResult, blankinterp=blankinterp,
-                                    nomask=nomask)
-            toolbox.data_copy(folded, sigResult)
-            toolbox.data_free(folded)
+            folded = tb.dcfold(sigResult, refResult, blankinterp=blankinterp,
+                               nomask=nomask)
+            tb.data_copy(folded, sigResult)
+            tb.data_free(folded)
             # and convert the units
-            toolbox.dcsetunits(sigResult, units, tau=tau, ap_eff=ap_eff,
+            tb.dcsetunits(sigResult, units, tau=tau, ap_eff=ap_eff,
                                ret_tau=ret_tau, ret_ap_eff=ret_ap_eff)
 
         # these are only used in the status line at the end
         tauInts[n_int] = ret_tau
         apEffInts[n_int] = ret_ap_eff
 
-        toolbox.dcaccum(res1accum, sigResult, weight=weight)
+        tb.dcaccum(res1accum, sigResult, weight=weight)
         if thisnofold:
-            toolbox.dcaccum(res2accum, refResult, weight=weight)
+            tb.dcaccum(res2accum, refResult, weight=weight)
         if keepints:
             # re-use existing DCs so space isn't wasted.
             # can't use the array element directly as it would
@@ -428,12 +1065,12 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
             # won't work: data_copy(sigResult, data[sig[n_int]])
             # instead, do this
             tmp = data[sig[n_int]]  # gets the right pointer
-            toolbox.data_copy(sigResult, tmp)  # copies header, re-uses pointer
+            tb.data_copy(sigResult, tmp)  # copies header, re-uses pointer
             data[sig[n_int]] = tmp  # puts it back in place
             if nofold:
                 # same here
                 tmp = data[ref[n_int]]  # gets the right pointer
-                toolbox.data_copy(refResult, tmp)  # copies header, re-uses pointer
+                tb.data_copy(refResult, tmp)  # copies header, re-uses pointer
                 data[ref[n_int]] = tmp  # puts it back in place
 
     if keepints:
@@ -446,12 +1083,12 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
         print('Result is all blanked - probably all of the data were flagged')
         # sigResult must therefore be all blanked, use it as the end result
         sigResult = sigResult
-        toolbox.data_free(sigResult)
-        if toolbox.data_valid(refResult) > 0:
-            toolbox.data_free(refResult)
-        if toolbox.data_valid(res2accum) > 0:
-            toolbox.data_free(res2accum)
-        toolbox.data_free(data)
+        tb.data_free(sigResult)
+        if tb.data_valid(refResult) > 0:
+            tb.data_free(refResult)
+        if tb.data_valid(res2accum) > 0:
+            tb.data_free(res2accum)
+        tb.data_free(data)
         return
 
     accumave(res1accum, sigResult, quiet=True)
@@ -464,25 +1101,25 @@ def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
             # refResult must be all blanked, use it as the result in buffer 1
             refResult = refResult
             # clean up
-            toolbox.data_free(sigResult)
-            toolbox.data_free(refResult)
-            toolbox.data_free(data)
+            tb.data_free(sigResult)
+            tb.data_free(refResult)
+            tb.data_free(data)
             return
-        toolbox.accumave(res2accum, refResult, quiet=True)
+        tb.accumave(res2accum, refResult, quiet=True)
         missing = missing or naccum2 != expectedCount
 
     status = 1
-    toolbox.set_data_container(sigResult)
+    tb.set_data_container(sigResult)
     if thisnofold:
-        toolbox.set_data_container(refResult, buffer=1)
+        tb.set_data_container(refResult, buffer=1)
     if not quiet:
         if missing:
             nmiss = expectedCount - naccum1
-        toolbox.calsummary(info.scan, sigResult.tsys, sigResult.units, tauInts=tauInts,
-                           apEffInts=apEffInts, missingInts=nmiss, ifnum=ret.ifnum,
-                           plnum=ret.plnum, fdnum=ret.fdnum)
+        tb.calsummary(info.scan, sigResult.tsys, sigResult.units, tauInts=tauInts,
+                      apEffInts=apEffInts, missingInts=nmiss, ifnum=ret['ifnum'],
+                      plnum=ret['plnum'], fdnum=ret['fdnum'])
 
-    toolbox.data_free(data)
-    toolbox.data_free(sigResult)
-    if toolbox.data_valid(refResult) > 0:
-        toolbox.data_free(refResult)
+    tb.data_free(data)
+    tb.data_free(sigResult)
+    if tb.data_valid(refResult) > 0:
+        tb.data_free(refResult)

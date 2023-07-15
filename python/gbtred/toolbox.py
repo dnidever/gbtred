@@ -1,6 +1,7 @@
 import os
 import numpy as np
 
+
 def dofreqswitch(sigwcal, sig, refwcal, ref, smoothref, tsys=None,
                  tau=None, tcal=None, sigResult=None, refResult=None):
     """
@@ -237,6 +238,62 @@ def dcmeantsys(dc_nocal, dc_withcal, tcal=None, used_tcal=None):
 
     return meanTsys
 
+def data_new(arr, spectrum=None, continuum=None, nocheck=False):
+    """
+    Create a new data_struct of the requested data type (spectrum or
+    continuum) and containing the given array, if supplied.  For
+    continuum data, when the data array is supplied, the additional
+    pointers (date, utc, mjd, etc) are set to double precision vectors
+    of 0s having the same number of elements as arr.
+ 
+    @param arr {in}{optional}{type=integer}{default=u1ndefined} The data
+    pointer that this data_struct will hold.  If arr is not provided,
+    then the data pointer will point to an undefined variable.
+
+    @keyword spectrum {in}{optional}{default=set} When this is set, a spectrum
+    structure will be returned.  That is the default behavior.
+
+    @keyword continuum {in}{optional}{default=unset} When this is set, a
+    continuum structure will be returned.  spectrum and continuum are mutually
+    exclusive.
+
+    @keyword nocheck {in}{optional}{default=unset} When this is set,
+    the input parameter checking is turned off.  Usefull for speed.
+
+    @returns requested data structure of given size or -1 on failure.
+    """
+    if not nocheck:
+        if len(arr.shape) != 1:
+            print('arr must be 1-dimensional')
+            return -1
+        if (spectrum is not None) and (continuum is not None):
+            print('Only one of spectrum or continuum can be used at a time')
+            return -1
+
+    if continuum is not None:
+        result = {"date": np.zeros_like(arr, dtype='U'),
+                  "utc": np.zeros_like(arr),
+                  "mjd": np.zeros_like(arr),
+                  "longitude_axis": np.zeros_like(arr),
+                  "latitude_axis": np.zeros_like(arr),
+                  "lst": np.zeros_like(arr),
+                  "azimuth": np.zeros_like(arr),
+                  "elevation": np.zeros_like(arr),
+                  "subref_state": np.ones_like(arr, dtype=int),
+                  "qd_el": np.full_like(arr, np.nan),
+                  "qd_xel": np.full_like(arr, np.nan),
+                  "qd_bad": np.full_like(arr, -1, dtype=int)}
+    else:
+        result = {"data": np.empty_like(arr)}
+
+    if len(arr.shape) == 1:
+        result["data"] = arr
+    else:
+        result["data"] = np.empty(0)
+
+    return result
+
+
 def data_free(data_struct):
     """
     Free the data pointer in a data structure.  This should only be
@@ -284,7 +341,6 @@ def data_free(data_struct):
                 ptr_free(data_struct[i].qd_bad)
 
     return
-
 
 
 def data_copy(in_data, out_data):
@@ -344,7 +400,7 @@ def data_copy(in_data, out_data):
             data_free(out_data)
         else:
             # If one is valid, they are all valid
-            outDataPtr = out_data.data_ptr
+            outDataPtr = out_data.data
             if name == 'CONTINUUM_STRUCT':
                 outDatePtr = out_data.date
                 outUtcPtr = out_data.utc
@@ -365,7 +421,7 @@ def data_copy(in_data, out_data):
     # Restore the out_data pointers
     if not ptr_valid(outDataPtr):
         # None of them are valid
-        out_data.data_ptr = ptr_new(allocate_heap=True)
+        out_data.data = ptr_new(allocate_heap=True)
         if name == 'CONTINUUM_STRUCT':
             out_data.date = ptr_new(allocate_heap=True)
             out_data.utc = ptr_new(allocate_heap=True)
@@ -381,7 +437,7 @@ def data_copy(in_data, out_data):
             out_data.qd_bad = ptr_new(allocate_heap=True)
     else:
         # All of them are valid
-        out_data.data_ptr = outDataPtr
+        out_data.data = outDataPtr
         if name == 'CONTINUUM_STRUCT':
             out_data.date = outDatePtr
             out_data.utc = outUtcPtr
@@ -399,11 +455,11 @@ def data_copy(in_data, out_data):
     # Now copy the data values into the pointers
     # All pointers should be valid here
     if data_valid(in_data) == 0:
-        if size(out_data.data_ptr, /type) != 0:
+        if size(out_data.data, /type) != 0:
             # No other way to do this, I think
             # If one is not undefined, they are all defined
             # They need to be undefined here
-            ptr_free(out_data.data_ptr)
+            ptr_free(out_data.data)
             out_data.data_ptr = ptr_new(allocate_heap=True)
             if name == 'CONTINUUM_STRUCT':
                 ptr_free(out_data.date)
@@ -431,7 +487,7 @@ def data_copy(in_data, out_data):
                 out_data.qd_xel = ptr_new(allocate_heap=True)
                 out_data.qd_bad = ptr_new(allocate_heap=True)
     else:
-        *out_data.data_ptr = *in_data.data_ptr
+        *out_data.data = *in_data.data
         if name == 'CONTINUUM_STRUCT':
             *out_data.date = *in_data.date
             *out_data.utc = *in_data.utc
