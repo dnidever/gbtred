@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from .datacontainer import DataContainer
 
 
 def dofreqswitch(sigwcal, sig, refwcal, ref, smoothref, tsys=None,
@@ -209,7 +210,6 @@ def dcmeantsys(dc_nocal, dc_withcal, tcal=None, used_tcal=None):
     @keyword used_tcal {out}{optional}{type=float} The tcal value
     actually used.
     """
-
     
     if tcal is None or len(tcal) > 1:
         if len(tcal) > 1:
@@ -219,7 +219,7 @@ def dcmeantsys(dc_nocal, dc_withcal, tcal=None, used_tcal=None):
         used_tcal = tcal[0]
 
     # Use the inner 80% of data to calculate mean Tsys
-    nchans = len(dc_nocal.data_ptr)
+    nchans = len(dc_nocal.data)
     pct10 = int(nchans / 10)
     pct90 = nchans - pct10
 
@@ -237,6 +237,7 @@ def dcmeantsys(dc_nocal, dc_withcal, tcal=None, used_tcal=None):
     np.seterr(**oldExcept)
 
     return meanTsys
+
 
 def data_new(arr, spectrum=None, continuum=None, nocheck=False):
     """

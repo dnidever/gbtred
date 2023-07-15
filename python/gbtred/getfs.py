@@ -637,6 +637,238 @@ def check_calib_args(scan, refscan, intnum=None, ifnum=None, plnum=None, fdnum=N
     return 1,ret,info
 
 
+def get_calib_data(info, ifnum, plnum, fdnum, sampler, count, intnum=None,
+                   useflag=None, skipflag=None, twofeeds=False, sig_state=None,
+                   wcalpos=None, subref=None):
+    """
+    Used by the calibration routines to actually fetch the necessary
+    data.
+
+    This is not meant to be called directly by the user.  Error messages
+    generated here are displayed using the prefix from the calling
+    routine.  It is expected that some argument checking will have
+    happened prior to this function being called.  The only checks done
+    here are that the requested data (ifnum, plnum, fdnum, and intnum)
+    are consistent with the given scan info.
+
+    <p>The returned values are the array of data containers found in the
+    current line data source that satisfy the request using the provided
+    scan info structure to indentify the scan.
+
+    <p>If there is a problem, the returned value is -1 and count is 0.
+
+    @param info {in}{required}{type=structure} The scan_info
+    structure that describes the scan.  Use
+    <a href="find_scan_info.html">find_scan_info</a> to get this
+    scan_info.
+    @param ifnum {in}{required}{type=integer} The IF number to
+    fetch
+    @param plnum {in}{required}{type=integer} The polarization
+    number to fetch.
+    @param fdnum {in}{required}{type=integer} The feed number to
+    fetch.  Ignored when twofeeds is set.
+    @param sampler {in}{required}{type=string} The sampler name, an
+    alternative to ifnum, plnum and fdnum.  This is used (and the others
+    are ignored) when it is not empty.
+    @param count {out}{optional}{type=integer} The number of data
+    containers returned.  This is 0 when there is a problem.
+    @keyword intnum {in}{optional}{type=integer} The specific
+    integration to fetch.  If not supplied then fetch data from all
+    integrations that match the other parameters.
+    @keyword useflag {in}{optional}{type=boolean or string}{default=true}
+    Apply all or just some of the flag rules?
+    @keyword skipflag {in}{optional}{type=boolean or string} Do not apply
+    any or do not apply a few of the flag rules?
+    @keyword twofeeds {in}{optional}{type=boolean} When set (1), then
+    this data must contain 2 and only two feeds and all data from both
+    feeds is returned by this call.  In that case, fdnum is ignored.
+    @keyword sig_state {in}{optional}{type=integer} When -1, this
+    keyword is ignored, when 0 then the reference state is selected,
+    when 1 then the sig state is selected.
+    @keyword wcalpos {in}{optional}{type=string} When set, then only
+    data matching this wcalpos string is fetched.  Ignored when fetching
+    data from an individual integration.
+    @keyword subref {in}{optional}{type=integer} When set, then only
+    data matching this subref value is fetched.  Ignored when fetching
+    data from an individual integration.
+    @returns an array of spectral line data containers that satisfy this
+    request.  Returns -1 on error (count will also be 0 in that case).
+    """
+
+    
+    count = 0
+
+    thisIF = ifnum
+    thisPL = plnum
+    thisFD = fdnum
+
+    thisSig = -1
+    sigVal = ''
+    if sig_state is not None:
+        thisSig = sig_state
+        sigVal = 'T' if thisSig else 'F'
+
+    if len(sampler) > 0:
+        if sampler not in info.samplers:
+            samplerList = ', '.join(info.samplers)
+            message = f"Illegal sampler name: {sampler}. Choose from: {samplerList}"
+            print(message)
+            return -1
+        
+        if twofeeds:
+            if info.n_feeds != 2:
+                message = f"Scan {str(info.scan)} does not have two feeds. n_feeds = {str(info.n_feeds)}"
+                print(message)
+                return -1
+
+            if thisFD < 0 or thisFD > 1:
+                message = f"Invalid feed: {str(thisFD)}. fdnum must be 0 or 1"
+                print(message)
+                return -1
+
+            if 0 not in info.fdnums or 1 not in info.fdnums:
+                message = "One or both of fdnum 0 and 1 are not present in this data."
+                print(message)
+                return -1
+
+        if intnum is not None:
+            if intnum <= (info.n_integrations - 1):
+                if thisSig >= 0:
+                    data = !g.lineio.get_spectra(count,
+                                                 srow=info.index_start, nrow=info.nrecords,
+                                                 sampler=sampler,
+                                                 int=intnum, sig=sigVal,
+                                                 useflag=useflag, skipflag=skipflag)
+                else:
+                    data = !g.lineio.get_spectra(count,
+                                                 srow=info.index_start, nrow=info.nrecords,
+                                                 sampler=sampler,
+                                                 int=intnum,
+                                                 useflag=useflag, skipflag=skipflag)
+            else:
+                message = "Integration number out of range"
+                print(message)
+                return -1
+        else:
+            if thisSig >= 0:
+                data = !g.lineio.get_spectra(count,
+                                             srow=info.index_start, nrow=info.nrecords,
+                                             sampler=sampler, sig=sigVal,
+                                             wcalpos=wcalpos, subref=subref,
+                                             useflag=useflag, skipflag=skipflag)
+            else:
+                data = !g.lineio.get_spectra(count,
+                                             srow=info.index_start, nrow=info.nrecords,
+                                             sampler=sampler,
+                                             wcalpos=wcalpos, subref=subref,
+                                             useflag=useflag, skipflag=skipflag)
+    else:
+        if twofeeds:
+            if info.n_feeds != 2:
+                message = f"Scan {str(info.scan)} does not have two feeds. n_feeds = {str(info.n_feeds)}"
+                print(message)
+                return -1
+
+            if thisFD < 0 or thisFD > 1:
+                message = f"Invalid feed: {str(thisFD)}. fdnum must be 0 or 1"
+                print(message)
+                return -1
+
+            if 0 not in info.fdnums or 1 not in info.fdnums:
+                message = "Both fdnum 0 and 1 must exist. At least one is missing."
+                print(message)
+                return -1
+
+            fdnum2 = 1 if thisFD == 0 else 0
+
+            plIndx = np.where(info.plnums == thisPL)[0]
+            thisPlnum = info.plnums[plIndx]
+
+            fdIndx = np.where(info.fdnums == fdnum2)[0]
+            thisfeed = info.feeds[fdIndx]
+
+            if intnum is not None:
+                if intnum <= (info.n_integrations - 1):
+                    if thisSig >= 0:
+                        data2 = !g.lineio.get_spectra(count,
+                                                      srow=info.index_start, nrow=info.nrecords,
+                                                      feed=thisfeed, ifnum=thisIF, plnum=thisPlnum, int=intnum,
+                                                      sig=sigVal,
+                                                      useflag=useflag, skipflag=skipflag)
+                    else:
+                        data2 = !g.lineio.get_spectra(count,
+                                                      srow=info.index_start, nrow=info.nrecords,
+                                                      feed=thisfeed, ifnum=thisIF, plnum=thisPlnum, int=intnum,
+                                                      useflag=useflag, skipflag=skipflag)
+                else:
+                    message = "Integration number out of range"
+                    print(message)
+                    return -1
+            else:
+                if thisSig >= 0:
+                    data2 = !g.lineio.get_spectra(count,
+                                                  srow=info.index_start, nrow=info.nrecords,
+                                                  feed=thisfeed, ifnum=thisIF, plnum=thisPlnum,
+                                                  sig=sigVal,
+                                                  wcalpos=wcalpos, subref=subref,
+                                                  useflag=useflag, skipflag=skipflag)
+                else:
+                    data2 = !g.lineio.get_spectra(count,
+                                                  srow=info.index_start, nrow=info.nrecords,
+                                                  feed=thisfeed, ifnum=thisIF, plnum=thisPlnum,
+                                                  wcalpos=wcalpos, subref=subref,
+                                                  useflag=useflag, skipflag=skipflag)
+
+            if thisFD == fdnum:
+                data = [data, data2]
+            else:
+                data = [data2, data]
+        else:
+            if thisFD not in info.fdnums:
+                fdnumList = ', '.join(str(fd) for fd in info.fdnums)
+                message = f"Invalid feed: {str(thisFD)}. This scan has the following FDNUMs: {fdnumList}"
+                print(message)
+                return -1
+
+            plIndx = np.where(info.plnums == thisPL)[0]
+            thisPlnum = info.plnums[plIndx]
+
+            thisfeed = thisFD
+
+            if intnum is not None:
+                if intnum <= (info.n_integrations - 1):
+                    if thisSig >= 0:
+                        data = !g.lineio.get_spectra(count,
+                                                     srow=info.index_start, nrow=info.nrecords,
+                                                     feed=thisfeed, ifnum=thisIF, plnum=thisPlnum, int=intnum,
+                                                     sig=sigVal,
+                                                     useflag=useflag, skipflag=skipflag)
+                    else:
+                        data = !g.lineio.get_spectra(count,
+                                                     srow=info.index_start, nrow=info.nrecords,
+                                                     feed=thisfeed, ifnum=thisIF, plnum=thisPlnum, int=intnum,
+                                                     useflag=useflag, skipflag=skipflag)
+                else:
+                    message = "Integration number out of range"
+                    print(message)
+                    return -1
+            else:
+                if thisSig >= 0:
+                    data = !g.lineio.get_spectra(count,
+                                                 srow=info.index_start, nrow=info.nrecords,
+                                                 feed=thisfeed, ifnum=thisIF, plnum=thisPlnum,
+                                                 sig=sigVal, wcalpos=wcalpos, subref=subref,
+                                                 useflag=useflag, skipflag=skipflag)
+                else:
+                    data = !g.lineio.get_spectra(count,
+                                                 srow=info.index_start, nrow=info.nrecords,
+                                                 feed=thisfeed, ifnum=thisIF, plnum=thisPlnum,
+                                                 wcalpos=wcalpos, subref=subref,
+                                                 useflag=useflag, skipflag=skipflag)
+
+    return data
+
+
 
 def getfs(scan, ifnum=None, intnum=None, plnum=None, fdnum=None, sampler=None,
           tsys=None, tau=None, ap_eff=None, smthoff=None, units=None,
