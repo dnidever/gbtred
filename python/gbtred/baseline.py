@@ -43,7 +43,28 @@ def getfreq(header):
     return result
 
 def freqtovel(freq, restfreq, veldef='RADIO'):
-    """ Convert from frequency units to velocity units."""
+    """
+    Convert from frequency units to velocity units.
+
+    Parameters
+    ----------
+    freq : numpy array
+
+    restfreq : float
+
+    velfreq : str, optional
+
+    Returns
+    -------
+    result : numpy array
+       
+
+    Example
+    -------
+
+    f = freqtovel(freq, restfreq)
+
+    """
     # from gbtidl/pro/toolbox/freqtovel.pro
 
     if veldef=='RADIO':
@@ -154,7 +175,6 @@ def dointegration(tab,npoly=5,verbose=True):
         coefarr = np.zeros([nspec,npoly+1],float)+np.nan
         for i in range(nspec):
             tab1 = tab[i:i+1].copy()
-            import pdb; pdb.set_trace()
             freq = getfreq(tab1)
             # Get frequency range for this spectrum
             lo, = np.where(np.abs(allfreq-freq[0]) < 10)
