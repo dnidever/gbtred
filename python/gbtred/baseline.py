@@ -23,11 +23,13 @@ def getfreq(header):
     frequency_interval = header['cdelt1']
     # spec.reference_frequency = self->get_row_value(row,'CRVAL1',virtuals,names,dd)
     reference_frequency = header['crval1']
-    if 'naxis1' in header:
-        npix = header['naxis1']
-    else:
-        npix = len(header['data'].squeeze())
-    
+    try:
+        if 'naxis1' in header:
+            npix = header['naxis1']
+        else:
+            npix = len(header['data'].squeeze())
+    except:
+        npix = len(header['data'].squeeze())        
     # from gbtidl/pro/toolbox/chantofreq.pro    
     # start by constructing the frequency axis
     result = np.arange(npix)
@@ -152,6 +154,7 @@ def dointegration(tab,npoly=5,verbose=True):
         coefarr = np.zeros([nspec,npoly+1],float)+np.nan
         for i in range(nspec):
             tab1 = tab[i:i+1].copy()
+            import pdb; pdb.set_trace()
             freq = getfreq(tab1)
             # Get frequency range for this spectrum
             lo, = np.where(np.abs(allfreq-freq[0]) < 10)
