@@ -88,7 +88,7 @@ def getvel(tab):
     vel = freqtovel(freq,tab['restfreq'])
     return vel
     
-def dosingle(tab,binsize=20,npoly=5,verbose=True):
+def dosingle(tab,binsize=20,npoly=5,maskvel=30e3,verbose=True):
     """
     Remove baseline for a single spectrum
     """
@@ -108,7 +108,7 @@ def dosingle(tab,binsize=20,npoly=5,verbose=True):
     # Fit polynomial and perform outlier rejection
     flag = True
     count = 0
-    goodmask = (np.abs(smvel) > 30e3) & np.isfinite(smspec)  # always mask zero-velocity region
+    goodmask = (np.abs(smvel) > maskvel) & np.isfinite(smspec)  # always mask zero-velocity region
     last_sig = 999999.
     last_nmask = nsmpix-np.sum(goodmask)
     while (flag):
@@ -123,7 +123,7 @@ def dosingle(tab,binsize=20,npoly=5,verbose=True):
         resid = smspec-model
         med = np.nanmedian(resid)
         sig = dln.mad(resid)
-        goodmask = ((np.abs(smvel) > 30e3) & (np.abs(resid) < 5*sig))
+        goodmask = ((np.abs(smvel) > maskvel) & (np.abs(resid) < 5*sig))
         nmask = nsmpix-np.sum(goodmask)
         if npoly1==npoly:
             if (count > 10) or ((last_sig-sig)/last_sig*100 < 5) or (nmask==last_nmask): flag=False
@@ -140,7 +140,7 @@ def dosingle(tab,binsize=20,npoly=5,verbose=True):
     return rspec,model,coef
 
 
-def dointegration(tab,npoly=5,verbose=True):
+def dointegration(tab,npoly=5,maskvel=maskvel,verbose=True):
     """
     Baseline correct all spectra for a single integration.
     """
@@ -183,7 +183,7 @@ def dointegration(tab,npoly=5,verbose=True):
             hi = hi[0]
             # Baseline correction
             if combspec is None:
-                rspec,model,coef = dosingle(tab1,verbose=verbose)                
+                rspec,model,coef = dosingle(tab1,maskvel=maskvel,verbose=verbose) 
             else:
             # Remove combined spectrum
                 temp = tab1.copy()
@@ -214,7 +214,13 @@ def dointegration(tab,npoly=5,verbose=True):
     out = {'spec':combspec,'nspec':ngood,'freq':allfreq,'vel':allvel,
            'freq_switch_offset':freq_switch_offset,
            'header':header,'coef':coefarr}
-        
+
+    # put in single dish format
+    # average 4 spectrum values
+    # 
+    
+    import pdb; pdb.set_trace()
+    
     return out
 
 def cleansidelobes(sp,smlen=5,verbose=False):
@@ -416,9 +422,35 @@ def rawfit(raw,sp):
     return refarr,calarr
 
             
-def session(filename,tag='_red',outfile=None,verbose=False):
+def session(filename,tag='_red',outfile=None,maskvel=30e3,verbose=False):
     """
     Baseline correct a full session of data for a target/map.
+
+    Parameters
+    ----------
+    filename : str
+      GBTIDL output filename.
+    tag : str, optional
+      Tag to add to final file.  tag='_red' by default.
+    outfile : str, optional
+      Output filename.  By default the output filename is the same as the
+        input filename with TAG added at the end.
+    maskvel : float, optional
+      Velocity around zero-velocity region to mask out.  Default is 30e3 m/s.
+    verbose : bool, optional
+      Verbose output to the screen.
+
+    Returns
+    -------
+    Saves the final datacube to the output filename.
+    Nothing is returned.
+
+
+    Example
+    -------
+
+    session(filename)
+
     """
 
     # Load data
@@ -455,7 +487,7 @@ def session(filename,tag='_red',outfile=None,verbose=False):
             if np.sum(np.isfinite(tab1['data'].data.data))==0:
                 print('  No good data for this scan')
                 continue
-            sp = dointegration(tab1,verbose=False)
+            sp = dointegration(tab1,maskvel=maskvel,verbose=False)
             sp['scan'] = s
             sp['int'] = integ
             sp[lontype] = tab1['crval2'][0]
@@ -487,6 +519,11 @@ def session(filename,tag='_red',outfile=None,verbose=False):
     hdulist[2].header['CTYPE1'] = 'velocity'
     print('Writing data to ',outfile)
     hdulist.writeto(outfile,overwrite=True)
+
+    # column names must be in all caps
+    # HDU1 extname needs to be "SINGLE DISH"
+    # gbtgridder expects all of the columns from the single dish data
+    
     
     #import pdb; pdb.set_trace()
 
