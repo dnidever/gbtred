@@ -88,27 +88,37 @@ def getvel(tab):
     vel = freqtovel(freq,tab['restfreq'])
     return vel
     
-def dosingle(tab,binsize=20,npoly=5,maskvel=30e3,verbose=True):
+def dosingle(tab,binsize=200,smlen=10,npoly=5,maskvel=30e3,edgetrim=12000,velrange=None,verbose=True):
     """
     Remove baseline for a single spectrum
     """
-    
-    spec = tab['data'].data.data.squeeze()
+
+    try:
+        spec = tab['data'].data.data.squeeze()
+    except:
+        spec = tab['data'].data.squeeze()
     npix = len(spec)
-    x = np.arange(npix)/(npix-1)  # scale from -1 to 1
+    px = np.arange(npix)
+    x = px/(npix-1)  # scale from -1 to 1
     x = (x-0.5)*2
     vel = getvel(tab)
     
     # Bin the data
     smspec = dln.rebin(spec,binsize=binsize)
     smx = dln.rebin(x,binsize=binsize)
+    smpx = dln.rebin(px,binsize=binsize)
     smvel = dln.rebin(vel,binsize=binsize)
-    nsmpix = len(smspec)
+    nsmpix = len(smx)
     
     # Fit polynomial and perform outlier rejection
     flag = True
     count = 0
     goodmask = (np.abs(smvel) > maskvel) & np.isfinite(smspec)  # always mask zero-velocity region
+    if velrange is not None:
+        godmask = goodmask & (smvel>velrange[0]) & (smvel<velrange[1])
+    # mask negative zero-velocity regions as well
+    if edgetrim is not None:
+        goodmask = goodmask & (smpx>edgetrim) & (smpx<(npix-edgetrim))
     last_sig = 999999.
     last_nmask = nsmpix-np.sum(goodmask)
     while (flag):
@@ -118,12 +128,22 @@ def dosingle(tab,binsize=20,npoly=5,maskvel=30e3,verbose=True):
             npoly1 = np.minimum(npoly,4) 
         else:
             npoly1 = npoly
+        # Some Gaussian smoothing
+        #temp = bspec.copy()
+        #temp[~goodmask] = np.nan
+        #smspec = dln.gsmooth(temp,smlen)
+        # Fit polynomial
         coef = robust.polyfit(smx[goodmask],smspec[goodmask],npoly1)
         model = np.polyval(coef,smx)
         resid = smspec-model
         med = np.nanmedian(resid)
         sig = dln.mad(resid)
         goodmask = ((np.abs(smvel) > maskvel) & (np.abs(resid) < 5*sig))
+        # grow the bad regions?
+        if velrange is not None:
+            godmask = goodmask & (smvel>velrange[0]) & (smvel<velrange[1])        
+        if edgetrim is not None:
+            goodmask = goodmask & (smpx>edgetrim) & (smpx<(npix-edgetrim))
         nmask = nsmpix-np.sum(goodmask)
         if npoly1==npoly:
             if (count > 10) or ((last_sig-sig)/last_sig*100 < 5) or (nmask==last_nmask): flag=False
@@ -136,11 +156,13 @@ def dosingle(tab,binsize=20,npoly=5,maskvel=30e3,verbose=True):
         
     model = np.polyval(coef,x)
     rspec = spec-model
-        
+
+    #import pdb; pdb.set_trace()
+    
     return rspec,model,coef
 
 
-def dointegration(tab,npoly=5,maskvel=maskvel,verbose=True):
+def dointegration(tab,npoly=5,maskvel=30e3,edgetrim=12000,maxiter=5,velrange=None,verbose=True):
     """
     Baseline correct all spectra for a single integration.
     """
@@ -183,13 +205,22 @@ def dointegration(tab,npoly=5,maskvel=maskvel,verbose=True):
             hi = hi[0]
             # Baseline correction
             if combspec is None:
-                rspec,model,coef = dosingle(tab1,maskvel=maskvel,verbose=verbose) 
+                rspec,model,coef = dosingle(tab1,maskvel=maskvel,
+                                            edgetrim=edgetrim,verbose=verbose) 
             else:
             # Remove combined spectrum
                 temp = tab1.copy()
                 temp['data'] -= combspec[lo:hi+1]
-                resid,model,coef = dosingle(temp,verbose=verbose)
-                rspec = tab1['data'].data.data.squeeze() - model
+                resid,model,coef = dosingle(temp,maskvel=maskvel,
+                                            edgetrim=edgetrim,verbose=verbose)
+                try:
+                    rspec = tab1['data'].data.data.squeeze() - model
+                except:
+                    rspec = tab1['data'].data.squeeze() - model                    
+            # Edgetrim                
+            if edgetrim is not None:
+                rspec[0:int(edgetrim)] = np.nan
+                rspec[-int(edgetrim):] = np.nan        
             # Add to array
             specarr[i,lo:hi+1] = rspec
             coefarr[i,:] = coef
@@ -200,7 +231,7 @@ def dointegration(tab,npoly=5,maskvel=maskvel,verbose=True):
         combspec = sumspec/ngood
         
         maxdiff = np.max(np.abs(combspec-last_combspec)) 
-        if maxdiff < 0.05 or count>5: flag=False
+        if maxdiff < 0.05 or count>maxiter: flag=False
         
         count += 1
         last_combspec = combspec
@@ -210,7 +241,34 @@ def dointegration(tab,npoly=5,maskvel=maskvel,verbose=True):
     # Calculate the switching amount
     crval1 = np.array([t['crval1'] for t in tab])
     freq_switch_offset = np.abs(np.max(crval1)-np.min(crval1))
-            
+
+    #import pdb; pdb.set_trace()
+    
+    ## Trim edges
+    #if edgetrim is not None:
+    #    lo = int(edgetrim)
+    #    hi = int(npix-edgetrim)
+    #    combspec = combspec[lo:hi]
+    #    ngood = ngood[lo:hi]
+    #    allfreq = allfreq[lo:hi]
+    #    allvel = allvel[lo:hi]
+    #    header['crpix1'] = header['crpix1']-edgetrim       # only change the reference pixel position
+    #    header['naxis1'] = len(combspec)         
+    #    # coefarr uses original x values (from -1 to +1)
+    
+    # Trim in velocity
+    if velrange is not None:
+        lo = np.where(allvel >= velrange[0])[0][0]
+        hi = np.where(allvel <= velrange[1])[0][-1]
+        combspec = combspec[lo:hi+1]
+        ngood = ngood[lo:hi+1]
+        allfreq = allfreq[lo:hi+1]
+        allvel = allvel[lo:hi+1]
+        header['crpix1'] = 1
+        header['crval1'] = allfreq[0]        
+        header['naxis1'] = len(combspec)         
+        # coefarr uses original x values (from -1 to +1)
+    
     out = {'spec':combspec,'nspec':ngood,'freq':allfreq,'vel':allvel,
            'freq_switch_offset':freq_switch_offset,
            'header':header,'coef':coefarr}
@@ -218,8 +276,6 @@ def dointegration(tab,npoly=5,maskvel=maskvel,verbose=True):
     # put in single dish format
     # average 4 spectrum values
     # 
-    
-    import pdb; pdb.set_trace()
     
     return out
 
@@ -422,7 +478,8 @@ def rawfit(raw,sp):
     return refarr,calarr
 
             
-def session(filename,tag='_red',outfile=None,maskvel=30e3,verbose=False):
+def session(filename,tag='_red',outfile=None,scans=None,maskvel=50e3,
+            edgetrim=2500,maxiter=5,velrange=[-800e3,800e3],verbose=False):
     """
     Baseline correct a full session of data for a target/map.
 
@@ -435,6 +492,8 @@ def session(filename,tag='_red',outfile=None,maskvel=30e3,verbose=False):
     outfile : str, optional
       Output filename.  By default the output filename is the same as the
         input filename with TAG added at the end.
+    scans : int or list, optional
+      List of scans to do.  Default is all.
     maskvel : float, optional
       Velocity around zero-velocity region to mask out.  Default is 30e3 m/s.
     verbose : bool, optional
@@ -463,8 +522,11 @@ def session(filename,tag='_red',outfile=None,maskvel=30e3,verbose=False):
 
     if outfile is None:
         outfile = filename.replace('.fits',tag+'.fits')
-    
-    scans = np.unique(tab['scan'].data)
+
+    if scans is None:
+        scans = np.unique(tab['scan'].data)
+    else:
+        if type(scans) is not list: scans=[scans]
     print(len(scans),' scans')
 
     # Coordinate names
@@ -487,7 +549,8 @@ def session(filename,tag='_red',outfile=None,maskvel=30e3,verbose=False):
             if np.sum(np.isfinite(tab1['data'].data.data))==0:
                 print('  No good data for this scan')
                 continue
-            sp = dointegration(tab1,maskvel=maskvel,verbose=False)
+            sp = dointegration(tab1,maskvel=maskvel,maxiter=maxiter,
+                               edgetrim=edgetrim,velrange=velrange,verbose=False)
             sp['scan'] = s
             sp['int'] = integ
             sp[lontype] = tab1['crval2'][0]
@@ -495,16 +558,22 @@ def session(filename,tag='_red',outfile=None,maskvel=30e3,verbose=False):
             finaldata.append(sp)
             
     # Reformat into a large table
-    npix = len(finaldata[0]['spec'])
+    npix = np.max([len(f['spec']) for f in finaldata])
     dt = [('scan',int),('int',int),('data',float,npix),('nspec',int,npix),(lontype,float),(lattype,float)]
     final = np.zeros(len(finaldata),dtype=np.dtype(dt))
+    final['data'] = np.nan
     for i in range(len(finaldata)):
+        npix1 = len(finaldata[i]['spec'])
         final['scan'][i] = finaldata[i]['scan']
         final['int'][i] = finaldata[i]['int']
-        final['data'][i] = finaldata[i]['spec']
-        final['nspec'][i] = finaldata[i]['nspec']  # how about exptime?
+        final['data'][i][0:npix1] = finaldata[i]['spec']
+        final['nspec'][i][0:npix1] = finaldata[i]['nspec']  # how about exptime?
         final[lontype][i] = finaldata[i][lontype]
         final[lattype][i] = finaldata[i][lattype]        
+
+
+    #import pdb; pdb.set_trace()
+
         
     # Write the data out to a file
     # put velocity information in the header
